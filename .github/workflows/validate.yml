@@ -1,0 +1,38 @@
+name: Validate Gap Signals
+
+on:
+  schedule:
+    # 03:50 UTC = 9:20 AM IST, Monday-Friday
+    - cron: "50 3 * * 1-5"
+  workflow_dispatch: {}
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Download previous scan's signals.csv
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          workflow: scan.yml
+          name: signals-csv
+          path: .
+          if_no_artifact_found: warn
+
+      - name: Run gap validation and send email
+        env:
+          EMAIL_ADDRESS: ${{ secrets.EMAIL_ADDRESS }}
+          EMAIL_APP_PASSWORD: ${{ secrets.EMAIL_APP_PASSWORD }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+        run: python scripts/validate_gap.py
