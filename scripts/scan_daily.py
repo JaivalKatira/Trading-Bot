@@ -11,6 +11,15 @@ SMA(200), and flags "candidate" LONG/SHORT calls:
 Candidates (plus the day's 0.25/0.75 candle levels) are written to signals.csv
 in the repo root. The next morning, validate_gap.py checks whether the actual
 opening price confirms the gap-reversion condition before sending any email.
+
+FIX (2026-07-24): scan_daily previously trusted df.iloc[-1] blindly. If the
+job ran while the market was still open, or ran off-schedule, yfinance could
+return a partial/live "today" candle whose close/RSI/SMA hadn't settled yet,
+producing spurious candidates. We now verify the latest bar's date actually
+matches "today" (within a small buffer) before using it. We also overwrite
+signals.csv at the START of the run (not just at the end) so a failed/partial
+run can never leave a stale signals.csv lying around for validate_gap.py to
+pick up by accident.
 """
 
 import os
@@ -23,12 +32,18 @@ import yfinance as yf
 REQUEST_PAUSE_SECONDS = 0.3
 RSI_PERIOD = 10
 SMA_PERIOD = 200
+MAX_BAR_STALENESS_DAYS = 5  # generous buffer for weekends/holidays
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(SCRIPT_DIR)
 DATA_DIR = os.path.join(REPO_ROOT, "data")
 UNIVERSE_FILE = os.path.join(DATA_DIR, "EQUITY_L.csv")
 OUTPUT_FILE = os.path.join(REPO_ROOT, "signals.csv")
+
+OUTPUT_COLUMNS = [
+    "symbol", "call", "signal_date", "close", "rsi10",
+    "sma200", "level_025", "level_075",
+]
 
 
 def load_universe():
@@ -66,13 +81,26 @@ def get_candidate_call(row):
     return None
 
 
+def reset_output_file():
+    """Write an empty signals.csv immediately, before any scanning happens.
+
+    This guarantees that if this run crashes or is killed partway through,
+    validate_gap.py will see an empty file rather than a stale signals.csv
+    left over from a previous successful run.
+    """
+    pd.DataFrame(columns=OUTPUT_COLUMNS).to_csv(OUTPUT_FILE, index=False)
+
+
 def main():
     today = datetime.now()
     start_date = today - timedelta(days=400)
     end_date = today + timedelta(days=1)
 
+    reset_output_file()
+
     symbols = load_universe()
     results = []
+    skipped_stale = 0
 
     for symbol in symbols:
         try:
@@ -95,6 +123,17 @@ def main():
             df = compute_indicators(df)
 
             last_row = df.iloc[-1]
+
+            # FIX: guard against partial/live candles and off-schedule runs.
+            # Only accept the last bar if its date is within a small window
+            # of "today" (handles weekends/holidays where yfinance's most
+            # recent bar is a few days old, e.g. scanning on a Monday).
+            bar_date = last_row["datetime"].date()
+            staleness = (today.date() - bar_date).days
+            if staleness < 0 or staleness > MAX_BAR_STALENESS_DAYS:
+                skipped_stale += 1
+                continue
+
             call = get_candidate_call(last_row)
             if call:
                 results.append({
@@ -112,12 +151,12 @@ def main():
         finally:
             time.sleep(REQUEST_PAUSE_SECONDS)
 
-    out_df = pd.DataFrame(results, columns=[
-        "symbol", "call", "signal_date", "close", "rsi10",
-        "sma200", "level_025", "level_075",
-    ])
+    out_df = pd.DataFrame(results, columns=OUTPUT_COLUMNS)
     out_df.to_csv(OUTPUT_FILE, index=False)
     print(f"Saved {len(out_df)} candidate calls to {OUTPUT_FILE}")
+    if skipped_stale:
+        print(f"Skipped {skipped_stale} symbols with stale/unexpected latest-bar dates "
+              f"(likely partial candle or off-schedule run).")
 
 
 if __name__ == "__main__":
