@@ -21,14 +21,8 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Download previous scan's signals.csv
-        uses: dawidd6/action-download-artifact@v6
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          workflow: scan.yml
-          name: signals-csv
-          path: .
-          if_no_artifact_found: warn
+      - name: Log actual start time
+        run: date -u
 
       - name: Run gap validation and send email
         env:
