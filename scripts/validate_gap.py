@@ -11,6 +11,14 @@ condition:
 
 Only confirmed calls are emailed - candidates that don't confirm are dropped
 silently, same as the original notebook logic.
+
+FIX (2026-07-24): validate_gap previously ignored the signal_date column
+entirely and confirmed whatever rows happened to be in signals.csv. If the
+hand-off between the two jobs ever picked up a stale file (failed run,
+retried job, caching quirk), this would silently confirm old candidates
+against today's open — producing calls that don't correspond to yesterday's
+actual scan. We now check signal_date against today's date and skip/report
+anything too old.
 """
 
 import os
@@ -26,6 +34,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(SCRIPT_DIR)
 SIGNALS_FILE = os.path.join(REPO_ROOT, "signals.csv")
 REQUEST_PAUSE_SECONDS = 0.3
+MAX_SIGNAL_STALENESS_DAYS = 3  # generous buffer for weekends/holidays
 
 
 def get_today_open(symbol):
@@ -53,13 +62,30 @@ def main():
         print("signals.csv is empty — no candidates from yesterday's scan.")
         return
 
+    today = datetime.now().date()
     confirmed = []
+    skipped_stale = 0
 
     for _, row in signals_df.iterrows():
         symbol = row["symbol"]
         call = row["call"]
         level_025 = row["level_025"]
         level_075 = row["level_075"]
+
+        # FIX: verify this candidate is actually from a recent scan before
+        # trusting it. Without this, a stale signals.csv (e.g. from a failed
+        # scan_daily run or a bad hand-off) gets silently confirmed against
+        # today's open, producing calls that don't belong to today.
+        try:
+            signal_date = pd.to_datetime(row["signal_date"]).date()
+        except Exception:
+            print(f"Skipping {symbol}: unparseable signal_date {row.get('signal_date')!r}")
+            continue
+
+        staleness = (today - signal_date).days
+        if staleness < 0 or staleness > MAX_SIGNAL_STALENESS_DAYS:
+            skipped_stale += 1
+            continue
 
         try:
             today_open = get_today_open(symbol)
@@ -73,6 +99,10 @@ def main():
             print(f"Skipping {symbol}: {e}")
         finally:
             time.sleep(REQUEST_PAUSE_SECONDS)
+
+    if skipped_stale:
+        print(f"Skipped {skipped_stale} candidates with stale signal_date "
+              f"(likely a stale/failed previous scan_daily run).")
 
     if confirmed:
         body = "\n".join(confirmed)
